@@ -1,5 +1,6 @@
 # peg_game.py
 import time  # For timing and display delays
+import concurrent.futures # For thread pool
 
 class Move:
     def __init__(self, start, jumped, destination):
@@ -98,34 +99,90 @@ class Solver:
         self.best_moves = []
 
     def solve(self, display=False, delay=1.0):
-        """Recursively find a solution minimizing remaining pegs."""
+        """Finds a solution minimizing remaining pegs using multithreading."""
         self.best_pegs = float('inf')
         self.best_moves = []
-        self._solve_recursive([], display, delay)
+
+        initial_moves = self.board.get_valid_moves()
+
+        if not initial_moves:
+            # If the game is already over or no moves possible from start
+            self.best_pegs = self.board.pegs_remaining()
+            self.best_moves = []
+            return self.best_pegs, self.best_moves
+
+        futures = []
+        # Using max_workers=None will default to the number of processors on the machine,
+        # which is a good starting point for CPU-bound tasks.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=None) as executor:
+            for move in initial_moves:
+                # Create a new board state for each initial move
+                next_board = Board(self.board.num_rows, 0) # Placeholder empty_hole, state is overwritten
+                next_board.state = self.board.state[:] # Copy current state
+                
+                # Apply the first move
+                next_board.apply_move(move)
+                
+                # Submit the worker task. The move_sequence starts with the current move.
+                futures.append(executor.submit(self._solve_worker, next_board, [move], display, delay))
+
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    pegs_left, move_sequence = future.result()
+                    if pegs_left < self.best_pegs:
+                        self.best_pegs = pegs_left
+                        self.best_moves = move_sequence
+                    elif pegs_left == self.best_pegs:
+                        # Optional: if pegs are equal, prefer shorter move sequences
+                        if len(move_sequence) < len(self.best_moves):
+                            self.best_moves = move_sequence
+                except Exception as exc:
+                    print(f'Generated an exception: {exc}')
+        
         return self.best_pegs, self.best_moves
 
-    def _solve_recursive(self, move_sequence, display, delay):
-        """Helper method for recursive backtracking."""
-        if self.board.is_game_over():
-            pegs_left = self.board.pegs_remaining()
-            if pegs_left < self.best_pegs:
-                self.best_pegs = pegs_left
-                self.best_moves = move_sequence[:]
-            return
+    def _solve_worker(self, board, current_move_sequence, display, delay):
+        """Worker method for recursive backtracking, operates on a given board.
+        Returns a tuple (pegs_left, move_sequence) for the best outcome in this path."""
+        if board.is_game_over():
+            return board.pegs_remaining(), current_move_sequence
 
-        moves = self.board.get_valid_moves()
+        best_pegs_found_in_path = float('inf')
+        best_moves_for_path = current_move_sequence # Default to current if no further moves improve
+        
+        # Get valid moves for the current board state
+        moves = board.get_valid_moves()
+        if not moves: # Base case: no more moves
+            return board.pegs_remaining(), current_move_sequence
+
         for move in moves:
-            saved_state = self.board.state[:]
-            self.board.apply_move(move)
-            if display:
-                print(f"\nMove: {move.start} -> {move.jumped} -> {move.destination}")
-                self.board.display()
-                print(f"Pegs remaining: {self.board.pegs_remaining()}")
-                # time.sleep(delay)  # Pause to show progress
-            self._solve_recursive(move_sequence + [move], display, delay)
-            self.board.state = saved_state
-            if self.best_pegs == 1:
-                return
+            # Save current board state to backtrack
+            original_board_state = board.state[:]
+            board.apply_move(move) # Apply move to the board instance for this worker
+            
+            # The 'display' and 'delay' parameters are less useful here due to threading.
+            # If display were True, console output would be heavily interleaved.
+            # For now, we pass them along as per requirements.
+            if display: 
+                # This part would need careful handling in a real multithreaded display scenario
+                # For example, using a lock or a dedicated display thread.
+                # print(f"Thread exploring move: {move.start} -> {move.jumped} -> {move.destination}")
+                pass
+
+            # Recursive call with the modified board and updated move sequence
+            pegs_left, resulting_moves = self._solve_worker(board, current_move_sequence + [move], display, delay)
+            
+            board.state = original_board_state # Backtrack: restore board state
+
+            if pegs_left < best_pegs_found_in_path:
+                best_pegs_found_in_path = pegs_left
+                best_moves_for_path = resulting_moves
+            elif pegs_left == best_pegs_found_in_path:
+                # If peg counts are equal, prefer shorter sequences
+                if len(resulting_moves) < len(best_moves_for_path):
+                    best_moves_for_path = resulting_moves
+        
+        return best_pegs_found_in_path, best_moves_for_path
 
 class Game:
     def __init__(self, num_rows=5, empty_hole=0):
@@ -190,5 +247,5 @@ class Game:
                 print("Better luck next time.")
 
 if __name__ == "__main__":
-    game = Game(num_rows=7, empty_hole=5)
+    game = Game(num_rows=7, empty_hole=5) 
     game.play(auto_solve=True)
